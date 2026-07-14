@@ -4,6 +4,8 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include "nkui.h"
+#include "cpu.h"
+#include "memory.h"
 
 /* We will use this renderer to draw into this window every frame. */
 static SDL_Window *window = NULL;
