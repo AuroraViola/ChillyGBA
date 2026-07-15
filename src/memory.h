@@ -44,3 +44,46 @@ static u8 mem_read_8(struct Memory *m, u32 addr) {
 			return 0xff;
 	}
 }
+
+static u16 mem_read_16(struct Memory *m, u32 addr) {
+	return mem_read_8(m, addr) << 8 | mem_read_8(m, addr + 1);
+}
+
+static u16 mem_read_32(struct Memory *m, u32 addr) {
+	return mem_read_16(m, addr) << 16 | mem_read_16(m, addr + 2);
+}
+
+static void mem_write_8(struct Memory *m, u32 addr, u8 value) {
+	switch (addr) {
+		case 0x02000000 ... 0x0203FFFF:
+			m->ewram[addr - 0x02000000] = value; 
+			break;
+		case 0x03000000 ... 0x03007FFF:
+			m->iwram[addr - 0x03000000] = value;
+			break;
+		case 0x04000000 ... 0x040003FF:
+			m->io[addr - 0x04000000] = value;
+			break;
+		case 0x05000000 ... 0x050003FF:
+			m->pram[addr - 0x05000000] = value;
+			break;
+		case 0x06000000 ... 0x06017FFF:
+			m->vram[addr - 0x06000000] = value;
+			break;
+		case 0x07000000 ... 0x070003FF:
+			m->oam[addr - 0x07000000] = value;
+			break;
+		default:
+			break;
+	}
+}
+
+static void mem_write_16(struct Memory *m, u32 addr, u16 value) {
+	mem_write_8(m, addr, value & 0xff);
+	mem_write_8(m, addr + 1, value >> 8);
+}
+
+static void mem_write_32(struct Memory *m, u32 addr, u32 value) {
+	mem_write_16(m, addr, value & 0xffff);
+	mem_write_16(m, addr + 2, value >> 16);
+}
