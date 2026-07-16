@@ -1,4 +1,5 @@
 #include "common.h"
+#include "memory.h"
 
 enum Banks {
 	SYSUSR=0,
@@ -34,7 +35,25 @@ enum Conditions {
 	AL = 14,
 };
 
-#define CPSR_T (1 << 5)
+enum DpOpCode {
+	DP_AND = 0,
+	DP_EOR = 1,
+	DP_SUB = 2,
+	DP_RSB = 3,
+	DP_ADD = 4,
+	DP_ADC = 5,
+	DP_SBC = 6,
+	DP_RSC = 7,
+	DP_TST = 8,
+	DP_TEQ = 9,
+	DP_CMP = 10,
+	DP_CMN = 11,
+	DP_ORR = 12,
+	DP_MOV = 13,
+	DP_BIC = 14,
+	DP_MVN = 15,
+};
+
 #define CPSR_MBITS 0b11111
 #define CPSR_MBITS_USR 0b10000
 #define CPSR_MBITS_FIQ 0b10001
@@ -45,18 +64,35 @@ enum Conditions {
 #define CPSR_MBITS_SYS 0b11111
 
 #define CONCAT_MASK(h, l) (((h) << 20) | (l) << 4)
+#define CPSR_T 5
 #define CPSR_V 28
 #define CPSR_C 29
 #define CPSR_N 30
 #define CPSR_Z 31
 #define CPSR_SET(cpsr, field, bit) ((cpsr) & ~(1 << (field)) | ((bit) << (field)))
 #define CPSR_GET(cpsr, field) (((cpsr) >> (field)) & 1)
+#define ROTATE_LEFT_8(value, n) (((value) << (n)) | ((value) >> (8-(n))))
+#define ROTATE_LEFT_16(value, n) (((value) << (n)) | ((value) >> (16-(n))))
+#define ROTATE_LEFT_32(value, n) (((value) << (n)) | ((value) >> (32-(n))))
+#define ROTATE_RIGHT_8(value, n) (((value) >> (n)) | ((value) << (8-(n))))
+#define ROTATE_RIGHT_16(value, n) (((value) >> (n)) | ((value) << (16-(n))))
+#define ROTATE_RIGHT_32(value, n) (((value) >> (n)) | ((value) << (32-(n))))
 
 struct cpu {
 	u32 regs[NBANKS][16];
 	u32 cpsr;
 	u32 spsr[NBANKS];
+	u32 instr_queue[2];
 };
+
+static void flush_pipeline(struct cpu *c) {
+	c->instr_queue[0] = 0xffffffff;
+	c->instr_queue[1] = 0xffffffff;
+}
+
+static void init_cpu(struct cpu *c) {
+	flush_pipeline(c);
+}
 
 static u32 *cpu_reg(struct cpu *c, int index) {
 	switch (c->cpsr & CPSR_MBITS) {
@@ -131,7 +167,7 @@ static bool check_condition(u32 cpsr, int code) {
 	}
 }
 
-static void execute_arm(struct cpu *c, u32 instruction) {
+static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 	if (!check_condition(c->cpsr, instruction >> 28)) {
 		return;
 	}
@@ -179,6 +215,21 @@ static void execute_arm(struct cpu *c, u32 instruction) {
 	}
 	// SWP
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b1111)) == CONCAT_MASK(0b00010000, 0b1001)) {
+		int rn = ((instruction >> 16) & 0b1111);
+		int rd = ((instruction >> 12) & 0b1111);
+		int rm = (instruction & 0b1111);
+		bool b = (instruction >> 22) & 1;
+
+		if (b) {
+			u8 value = mem_read_8(m, *cpu_reg(c, rn));
+			mem_write_8(m, *cpu_reg(c, rn), *cpu_reg(c, rm));
+			*cpu_reg(c, rd) = value;
+		}
+		else {
+			u32 value = mem_read_32(m, *cpu_reg(c, rn));
+			mem_write_32(m, *cpu_reg(c, rn), *cpu_reg(c, rm));
+			*cpu_reg(c, rd) = value;
+		}
 	}
 	// LDRH, STRH
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b1111)) == CONCAT_MASK(0b00000000, 0b1011)) {
@@ -197,18 +248,176 @@ static void execute_arm(struct cpu *c, u32 instruction) {
 	}
 	// BX
 	else if ((instruction & CONCAT_MASK(0b11111111, 0b1111)) == CONCAT_MASK(0b00010010, 0b0001)) {
+		int rn = (instruction & 0xf);
+		if (*cpu_reg(c, rn) & 1) {
+			c->cpsr = CPSR_SET(c->cpsr, CPSR_T, 1);
+		}
+		*cpu_reg(c, 15) = *cpu_reg(c, rn);
+		flush_pipeline(c);
 	}
 	// Data Processing (immediate Shift)
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0001)) == CONCAT_MASK(0b00000000, 0b0000)) {
+		int opcode = (instruction >> 21) & 0b1111;
+		int rn = ((instruction >> 16) & 0b1111);
+		int rd = ((instruction >> 12) & 0b1111);
+		int op2 = (instruction & 0xffffff);
+		bool s = (instruction >> 20) & 1;
 	}
 	// Data Processing (register Shift)
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b1001)) == CONCAT_MASK(0b00000000, 0b0001)) {
+		int opcode = (instruction >> 21) & 0b1111;
+		int rn = ((instruction >> 16) & 0b1111);
+		int rd = ((instruction >> 12) & 0b1111);
+		int op2 = (instruction & 0xffffff);
+		bool s = (instruction >> 20) & 1;
 	}
 	// Undefined instruction in Data Processing
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b0000)) == CONCAT_MASK(0b00110000, 0b0000)) {
 	}
 	// Data Processing (immediate Value)
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b00100000, 0b0000)) {
+		int opcode = (instruction >> 21) & 0b1111;
+		int rn = ((instruction >> 16) & 0b1111);
+		int rd = ((instruction >> 12) & 0b1111);
+		int op2 = (instruction & 0xffffff);
+		bool s = (instruction >> 20) & 1;
+
+		u32 imm = op2 & 0xff;
+		u8 rotate = op2 >> 8;
+		bool carry_final_bit;
+		bool overflow_final_bit;
+		
+		u32 operand2 = ROTATE_RIGHT_32(imm, (rotate << 1));
+		if (rotate != 0) {
+			carry_final_bit = ((imm >> ((rotate << 1) - 1) & 1) != 0);
+			CPSR_SET(c->cpsr, CPSR_C, ((imm >> ((rotate << 1) - 1) & 1) != 0));
+		}
+		u32 result;
+		u64 result64;
+		u32 op3 = CPSR_GET(c->cpsr, CPSR_C) ^ 1;
+		switch (opcode) {
+			case DP_AND:
+				*cpu_reg(c, rd) = *cpu_reg(c, rn) & operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_EOR:
+				*cpu_reg(c, rd) = *cpu_reg(c, rn) ^ operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_SUB:
+				result = *cpu_reg(c, rn) - operand2;
+				if (s) {
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_C, *cpu_reg(c, rn) >= operand2);
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_V, (((*cpu_reg(c, rn) ^ operand2) & ((*cpu_reg(c, rn) ^ result) >> 31)) != 0));
+				}
+				*cpu_reg(c, rd) = result;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_RSB:
+				result = operand2 - *cpu_reg(c, rn);
+				if (s) {
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_C, *cpu_reg(c, rn) <= operand2);
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_V, (((operand2 ^ *cpu_reg(c, rn)) & ((operand2 ^ result) >> 31)) != 0));
+				}
+				*cpu_reg(c, rd) = result;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_ADD:
+				result = *cpu_reg(c, rn) + operand2;
+				if (s) {
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_C, *cpu_reg(c, rn) > result);
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_V, (((*cpu_reg(c, rn) ^ operand2) & ((operand2 ^ result) >> 31)) != 0));
+				}
+				*cpu_reg(c, rd) = result;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_ADC:
+				result64 = *cpu_reg(c, rn) + operand2 + CPSR_GET(c->cpsr, CPSR_C);
+				if (s) {
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_C, result64 >> 32 != 0);
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_V, (((*cpu_reg(c, rn) ^ operand2) & ((operand2 ^ ((u32)result64)) >> 31)) != 0));
+				}
+				*cpu_reg(c, rd) = (u32)result64;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_SBC:
+				result = *cpu_reg(c, rn) - operand2 - op3;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, result >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!result);
+				if (s) {
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_C, (u64)*cpu_reg(c,rn) >= ((u64)operand2 + (u64)op3));
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_V, (((*cpu_reg(c, rn) ^ operand2) & ((*cpu_reg(c, rn) ^ result) >> 31)) != 0));
+				}
+				*cpu_reg(c, rd) = result;
+				break;
+			case DP_RSC:
+				result = operand2 - *cpu_reg(c, rn) - op3;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, result >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!result);
+				if (s) {
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_C, (u64)operand2 >= ((u64)*cpu_reg(c,rn) + (u64)op3));
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_V, (((operand2 ^ *cpu_reg(c, rn)) & ((operand2 ^ result) >> 31)) != 0));
+				}
+				*cpu_reg(c, rd) = result;
+				break;
+			case DP_TST:
+				result = *cpu_reg(c, rn) & operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, result >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!result);
+				break;
+			case DP_TEQ:
+				result = *cpu_reg(c, rn) ^ operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, result >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!result);
+				break;
+			case DP_CMP:
+				result = *cpu_reg(c, rn) - operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, result >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!result);
+				if (s) {
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_C, *cpu_reg(c, rn) >= operand2);
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_V, (((*cpu_reg(c, rn) ^ operand2) & ((*cpu_reg(c, rn) ^ result) >> 31)) != 0));
+				}
+				break;
+			case DP_CMN:
+				result = *cpu_reg(c, rn) + operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, result >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!result);
+				if (s) {
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_C, *cpu_reg(c, rn) > result);
+					c->cpsr = CPSR_SET(c->cpsr, CPSR_V, (((*cpu_reg(c, rn) ^ operand2) & ((operand2 ^ result) >> 31)) != 0));
+				}
+				break;
+			case DP_ORR:
+				*cpu_reg(c, rd) = *cpu_reg(c, rn) | operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_MOV:
+				*cpu_reg(c, rd) = operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_BIC:
+				*cpu_reg(c, rd) = *cpu_reg(c, rn) & ~operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+			case DP_MVN:
+				*cpu_reg(c, rd) = ~operand2;
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_N, *cpu_reg(c, rd) >> 31);
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
+				break;
+		}
+		if (rd == 15) {
+			*cpu_reg(c, rd) += 4;
+		}
 	}
 	// LDR, STR (immediate offset)
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b01000000, 0b0000)) {
@@ -221,6 +430,15 @@ static void execute_arm(struct cpu *c, u32 instruction) {
 	}
 	// B, BL
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b10100000, 0b0000)) {
+		int offset = (instruction & 0xffffff);
+		bool l = (instruction >> 24) & 1;
+		offset |= (offset >> 23) ? 0xff000000 : 0;
+		// TODO check if PC offsets are correct
+		if (l) {
+			*cpu_reg(c, 14) = *cpu_reg(c, 15) - 4;
+		}
+		*cpu_reg(c, 15) += offset - 8;
+		flush_pipeline(c);
 	}
 	// STC, LDC
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b11000000, 0b0000)) {
