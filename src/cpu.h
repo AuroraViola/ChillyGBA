@@ -77,6 +77,8 @@ enum DpOpCode {
 #define ROTATE_RIGHT_8(value, n) (((value) >> (n)) | ((value) << (8-(n))))
 #define ROTATE_RIGHT_16(value, n) (((value) >> (n)) | ((value) << (16-(n))))
 #define ROTATE_RIGHT_32(value, n) (((value) >> (n)) | ((value) << (32-(n))))
+#define mmin(a,b) (((a) < (b)) ? (a) : (b))
+#define mmax(a,b) (((a) > (b)) ? (a) : (b))
 
 struct cpu {
 	u32 regs[NBANKS][16];
@@ -255,42 +257,86 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 		*cpu_reg(c, 15) = *cpu_reg(c, rn);
 		flush_pipeline(c);
 	}
-	// Data Processing (immediate Shift)
-	else if ((instruction & CONCAT_MASK(0b11100000, 0b0001)) == CONCAT_MASK(0b00000000, 0b0000)) {
-		int opcode = (instruction >> 21) & 0b1111;
-		int rn = ((instruction >> 16) & 0b1111);
-		int rd = ((instruction >> 12) & 0b1111);
-		int op2 = (instruction & 0xffffff);
-		bool s = (instruction >> 20) & 1;
-	}
-	// Data Processing (register Shift)
-	else if ((instruction & CONCAT_MASK(0b11100000, 0b1001)) == CONCAT_MASK(0b00000000, 0b0001)) {
-		int opcode = (instruction >> 21) & 0b1111;
-		int rn = ((instruction >> 16) & 0b1111);
-		int rd = ((instruction >> 12) & 0b1111);
-		int op2 = (instruction & 0xffffff);
-		bool s = (instruction >> 20) & 1;
-	}
 	// Undefined instruction in Data Processing
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b0000)) == CONCAT_MASK(0b00110000, 0b0000)) {
 	}
-	// Data Processing (immediate Value)
-	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b00100000, 0b0000)) {
+	// Data Processing
+	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b00100000, 0b0000) ||
+			(instruction & CONCAT_MASK(0b11100000, 0b0001)) == CONCAT_MASK(0b00000000, 0b0000) ||
+			(instruction & CONCAT_MASK(0b11100000, 0b1001)) == CONCAT_MASK(0b00000000, 0b0001)) {
 		int opcode = (instruction >> 21) & 0b1111;
 		int rn = ((instruction >> 16) & 0b1111);
 		int rd = ((instruction >> 12) & 0b1111);
 		int op2 = (instruction & 0xffffff);
 		bool s = (instruction >> 20) & 1;
+		bool i = (instruction >> 25) & 1;
 
-		u32 imm = op2 & 0xff;
-		u8 rotate = op2 >> 8;
-		bool carry_final_bit;
-		bool overflow_final_bit;
-		
-		u32 operand2 = ROTATE_RIGHT_32(imm, (rotate << 1));
-		if (rotate != 0) {
-			carry_final_bit = ((imm >> ((rotate << 1) - 1) & 1) != 0);
-			CPSR_SET(c->cpsr, CPSR_C, ((imm >> ((rotate << 1) - 1) & 1) != 0));
+		u32 operand2;
+		if (i == 0) {
+			u8 rm = op2 & 0xf;
+			int shift = op2 >> 4;
+			bool immediate_shift = (shift & 1) == 0;
+			u8 shift_amount = immediate_shift ? (shift >> 3) : *cpu_reg(c, (shift >> 4) & 0xf);
+			bool carry = CPSR_GET(c->cpsr, CPSR_C);
+			switch ((shift >> 1) & 3) {
+				case 0b00:
+					shift_amount = mmin(shift_amount, 33);
+					if (shift_amount != 0) {
+						carry = (((u32)((u64)(*cpu_reg(c, rm)) << (shift_amount - 1))) >> 31) != 0;
+						c->cpsr = CPSR_SET(c->cpsr, CPSR_C, carry);
+					}
+					operand2 = (u32)((u64)(*cpu_reg(c, rm)) << shift_amount);
+					break;
+				case 0b01:
+					if (immediate_shift && shift_amount == 0) {
+						shift_amount = 32;
+					}
+					shift_amount = mmin(shift_amount, 33);
+					if (shift_amount != 0) {
+						carry = (((u64)(*cpu_reg(c, rm)) >> (shift_amount-1)) & 1) != 0;
+					}
+					operand2 = (u64)(((u64)*cpu_reg(c, rm)) >> shift_amount);
+					break;
+				case 0b10:
+					if (immediate_shift && shift_amount == 0) {
+						shift_amount = 32;
+					}
+					shift_amount = mmin(shift_amount, 33);
+					if (shift_amount != 0) {
+						carry = (((i64)((i32)(*cpu_reg(c, rm)))) >> (shift_amount -1) & 1) != 0;
+						c->cpsr = CPSR_SET(c->cpsr, CPSR_C, carry);
+					}
+					operand2 = (((i64)((i32)*cpu_reg(c, rm))) >> shift_amount);
+					break;
+				case 0b11:
+					if (immediate_shift && shift_amount == 0) {
+						bool tmp_carry = (*cpu_reg(c, rm) & 1) != 0;
+						operand2 = (*cpu_reg(c, rm) >> 1) | ((carry ? 1 : 0) << 31);
+						c->cpsr = CPSR_SET(c->cpsr, CPSR_C, tmp_carry);
+					}
+					else {
+						if (shift_amount != 0) {
+							shift_amount = shift_amount & 31;
+							operand2 = (*cpu_reg(c, rm) >> shift_amount) | (*cpu_reg(c, rm) << ((32 - shift_amount) & 31));
+							carry = ((operand2 >> 31) & 1) != 0;
+							c->cpsr = CPSR_SET(c->cpsr, CPSR_C, carry);
+						}
+						else {
+							operand2 = *cpu_reg(c, rm);
+						}
+					}
+					break;
+				default:
+					abort();
+			}
+		}
+		else {
+			u32 imm = op2 & 0xff;
+			u8 rotate = op2 >> 8;
+			operand2 = ROTATE_RIGHT_32(imm, (rotate << 1));
+			if (rotate != 0) {
+				c->cpsr = CPSR_SET(c->cpsr, CPSR_C, ((imm >> ((rotate << 1) - 1) & 1) != 0));
+			}
 		}
 		u32 result;
 		u64 result64;
