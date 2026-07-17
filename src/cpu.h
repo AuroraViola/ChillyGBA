@@ -96,7 +96,28 @@ static void init_cpu(struct cpu *c) {
 	flush_pipeline(c);
 }
 
-static u32 *cpu_reg(struct cpu *c, int index) {
+static u32 *cpu_spsr(struct cpu *c) {
+	switch (c->cpsr & CPSR_MBITS) {
+		case CPSR_MBITS_USR:
+		case CPSR_MBITS_SYS:
+			// Shouldn't exist
+			return &c->spsr[SYSUSR];
+		case CPSR_MBITS_FIQ:
+			return &c->spsr[FIQ];
+		case CPSR_MBITS_IRQ:
+			return &c->spsr[IRQ];
+		case CPSR_MBITS_SVC:
+			return &c->spsr[SVC];
+		case CPSR_MBITS_ABT:
+			return &c->spsr[ABT];
+		case CPSR_MBITS_UND:
+			return &c->spsr[UND];
+		default:
+			abort();
+	}
+}
+
+static u32 *cpu_reg(struct cpu *c, u8 index) {
 	switch (c->cpsr & CPSR_MBITS) {
 		case CPSR_MBITS_USR:
 		case CPSR_MBITS_SYS:
@@ -164,7 +185,7 @@ static bool check_condition(u32 cpsr, int code) {
 		case AL:
 			return true;
 		default:
-			// TODO check this
+			// TODO check what happens here
 			return false;
 	}
 }
@@ -241,9 +262,20 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 	}
 	// MRS
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b1111)) == CONCAT_MASK(0b00010000, 0b0000)) {
+		int rd = ((instruction >> 12) & 0b1111);
+		bool ps = (instruction >> 22) & 1;
+		*cpu_reg(c, rd) = ps ? *cpu_spsr(c) : c->cpsr;
 	}
 	// MSR (register)
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b1111)) == CONCAT_MASK(0b00010010, 0b0000)) {
+		int rm = instruction & 0b1111;
+		bool pd = (instruction >> 22) & 1;
+		if (pd == 0) {
+			c->cpsr = *cpu_reg(c, rm);
+		}
+		else {
+			*cpu_spsr(c) = *cpu_reg(c, rm);
+		}
 	}
 	// MSR (immediate)
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b0000)) == CONCAT_MASK(0b00110010, 0b0000)) {
