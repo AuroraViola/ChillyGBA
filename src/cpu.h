@@ -63,6 +63,7 @@ enum DpOpCode {
 #define CPSR_MBITS_UND 0b11011
 #define CPSR_MBITS_SYS 0b11111
 
+#define CPSR_FLAG_MASK 0xf0000000
 #define CONCAT_MASK(h, l) (((h) << 20) | (l) << 4)
 #define CPSR_T 5
 #define CPSR_V 28
@@ -270,15 +271,33 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b1111)) == CONCAT_MASK(0b00010010, 0b0000)) {
 		int rm = instruction & 0b1111;
 		bool pd = (instruction >> 22) & 1;
+		// TODO Usermode
+		bool only_flags = (instruction >> 16) & 1;
 		if (pd == 0) {
-			c->cpsr = *cpu_reg(c, rm);
+			c->cpsr = only_flags ? (c->cpsr & ~CPSR_FLAG_MASK) | (*cpu_reg(c, rm) & CPSR_FLAG_MASK) : *cpu_reg(c, rm);
 		}
 		else {
-			*cpu_spsr(c) = *cpu_reg(c, rm);
+			*cpu_spsr(c) = only_flags ? (*cpu_spsr(c) & ~CPSR_FLAG_MASK) | (*cpu_reg(c, rm) & CPSR_FLAG_MASK) : *cpu_reg(c, rm);
 		}
 	}
 	// MSR (immediate)
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b0000)) == CONCAT_MASK(0b00110010, 0b0000)) {
+		int rm = instruction & 0b1111;
+		bool pd = (instruction >> 22) & 1;
+
+		u32 imm = instruction & 0xff;
+		u8 rotate = (instruction >> 8) & 0xf;
+		u32 operand = ROTATE_RIGHT_32(imm, (rotate << 1));
+		if (rotate != 0) {
+			c->cpsr = CPSR_SET(c->cpsr, CPSR_C, ((imm >> ((rotate << 1) - 1) & 1) != 0));
+		}
+
+		if (pd == 0) {
+			c->cpsr = (c->cpsr & ~CPSR_FLAG_MASK) | (operand & CPSR_FLAG_MASK);
+		}
+		else {
+			*cpu_spsr(c) = (*cpu_spsr(c) & ~CPSR_FLAG_MASK) | (operand & CPSR_FLAG_MASK);
+		}
 	}
 	// BX
 	else if ((instruction & CONCAT_MASK(0b11111111, 0b1111)) == CONCAT_MASK(0b00010010, 0b0001)) {
@@ -299,7 +318,7 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 		int opcode = (instruction >> 21) & 0b1111;
 		int rn = ((instruction >> 16) & 0b1111);
 		int rd = ((instruction >> 12) & 0b1111);
-		int op2 = (instruction & 0xffffff);
+		int op2 = (instruction & 0xfff);
 		bool s = (instruction >> 20) & 1;
 		bool i = (instruction >> 25) & 1;
 
@@ -497,11 +516,109 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 			*cpu_reg(c, rd) += 4;
 		}
 	}
-	// LDR, STR (immediate offset)
-	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b01000000, 0b0000)) {
-	}
-	// LDR, STR (register offset)
-	else if ((instruction & CONCAT_MASK(0b11100000, 0b0001)) == CONCAT_MASK(0b01100000, 0b0000)) {
+	// LDR, STR
+	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b01000000, 0b0000) ||
+			(instruction & CONCAT_MASK(0b11100000, 0b0001)) == CONCAT_MASK(0b01100000, 0b0000)) {
+		int rn = ((instruction >> 16) & 0b1111);
+		int rm = instruction & 0xf;
+		int rd = ((instruction >> 12) & 0b1111);
+		int offset_field = (instruction & 0xfff);
+		bool i = (instruction >> 25) & 1;
+		bool p = (instruction >> 24) & 1;
+		bool u = (instruction >> 23) & 1;
+		bool b = (instruction >> 22) & 1;
+		bool w = (instruction >> 21) & 1;
+		bool l = (instruction >> 20) & 1;
+
+		u32 offset;
+		u32 effective_address = *cpu_reg(c, rn);
+
+		if (i == 0) {
+			offset = offset_field;
+		}
+		else {
+			int shift = offset_field >> 4;
+			bool immediate_shift = (shift & 1) == 0;
+			u8 shift_amount = immediate_shift ? (shift >> 3) : *cpu_reg(c, (shift >> 4) & 0xf);
+			bool carry = CPSR_GET(c->cpsr, CPSR_C);
+			switch ((shift >> 1) & 3) {
+				case 0b00:
+					shift_amount = mmin(shift_amount, 33);
+					if (shift_amount != 0) {
+						carry = (((u32)((u64)(*cpu_reg(c, rm)) << (shift_amount - 1))) >> 31) != 0;
+						c->cpsr = CPSR_SET(c->cpsr, CPSR_C, carry);
+					}
+					offset = (u32)((u64)(*cpu_reg(c, rm)) << shift_amount);
+					break;
+				case 0b01:
+					if (immediate_shift && shift_amount == 0) {
+						shift_amount = 32;
+					}
+					shift_amount = mmin(shift_amount, 33);
+					if (shift_amount != 0) {
+						carry = (((u64)(*cpu_reg(c, rm)) >> (shift_amount-1)) & 1) != 0;
+					}
+					offset = (u64)(((u64)*cpu_reg(c, rm)) >> shift_amount);
+					break;
+				case 0b10:
+					if (immediate_shift && shift_amount == 0) {
+						shift_amount = 32;
+					}
+					shift_amount = mmin(shift_amount, 33);
+					if (shift_amount != 0) {
+						carry = (((i64)((i32)(*cpu_reg(c, rm)))) >> (shift_amount -1) & 1) != 0;
+						c->cpsr = CPSR_SET(c->cpsr, CPSR_C, carry);
+					}
+					offset = (((i64)((i32)*cpu_reg(c, rm))) >> shift_amount);
+					break;
+				case 0b11:
+					if (immediate_shift && shift_amount == 0) {
+						bool tmp_carry = (*cpu_reg(c, rm) & 1) != 0;
+						offset = (*cpu_reg(c, rm) >> 1) | ((carry ? 1 : 0) << 31);
+						c->cpsr = CPSR_SET(c->cpsr, CPSR_C, tmp_carry);
+					}
+					else {
+						if (shift_amount != 0) {
+							shift_amount = shift_amount & 31;
+							offset = (*cpu_reg(c, rm) >> shift_amount) | (*cpu_reg(c, rm) << ((32 - shift_amount) & 31));
+							carry = ((offset >> 31) & 1) != 0;
+							c->cpsr = CPSR_SET(c->cpsr, CPSR_C, carry);
+						}
+						else {
+							offset = *cpu_reg(c, rm);
+						}
+					}
+					break;
+				default:
+					abort();
+			}
+		}
+		if (!u) {
+			offset = -offset;
+		}
+		if (p) {
+			effective_address += offset;
+		}
+		if (w) {
+			*cpu_reg(c, rn) += offset;
+		}
+
+		if (l) {
+			if (b) {
+				*cpu_reg(c, rd) = mem_read_8(m, effective_address);
+			}
+			else {
+				*cpu_reg(c, rd) = mem_read_32(m, effective_address);
+			}
+		}
+		else {
+			if (b) {
+				mem_write_8(m, effective_address, *cpu_reg(c, rd));
+			}
+			else {
+				mem_write_32(m, effective_address, *cpu_reg(c, rd));
+			}
+		}
 	}
 	// LDM, STM
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b10000000, 0b0000)) {
@@ -520,12 +637,15 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 	}
 	// STC, LDC
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b11000000, 0b0000)) {
+		// Nothing happens here
 	}
 	// CDP
 	else if ((instruction & CONCAT_MASK(0b11110000, 0b0001)) == CONCAT_MASK(0b11100000, 0b0000)) {
+		// Nothing happens here
 	}
 	// MCR, MRC
 	else if ((instruction & CONCAT_MASK(0b11110000, 0b0001)) == CONCAT_MASK(0b11100000, 0b0001)) {
+		// Nothing happens here
 	}
 	// SWI
 	else if ((instruction & CONCAT_MASK(0b11110000, 0b0000)) == CONCAT_MASK(0b11110000, 0b0000)) {
