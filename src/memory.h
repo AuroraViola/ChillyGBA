@@ -46,11 +46,11 @@ static u8 mem_read_8(struct Memory *m, u32 addr) {
 }
 
 static u16 mem_read_16(struct Memory *m, u32 addr) {
-	return mem_read_8(m, addr) << 8 | mem_read_8(m, addr + 1);
+	return ((u16)mem_read_8(m, addr + 1) << 8) | mem_read_8(m, addr);
 }
 
-static u16 mem_read_32(struct Memory *m, u32 addr) {
-	return mem_read_16(m, addr) << 16 | mem_read_16(m, addr + 2);
+static u32 mem_read_32(struct Memory *m, u32 addr) {
+	return ((u32)mem_read_16(m, addr + 2)) << 16 | mem_read_16(m, addr);
 }
 
 static void mem_write_8(struct Memory *m, u32 addr, u8 value) {

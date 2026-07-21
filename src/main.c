@@ -22,7 +22,16 @@ struct InputStates {
     bool menu;
 };
 
+struct Memory mem;
+struct Cpu cpu;
+
 struct InputStates inputStates = {0};
+
+void load_rom(struct Memory *m, char *path) {
+	FILE *f = fopen(path, "r");
+	fread(m->gamepak, 1, 1 << 25, f);
+	fclose(f);
+}
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_SetAppMetadata("ChillyGBA", "0.1.0", "io.auroraviola.chillyGBA");
@@ -44,6 +53,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     NkUiInit(window, renderer);
 
     inputStates.menu = false;
+
+	mem_init(&mem);
+	cpu_init(&cpu);
+	load_rom(&mem, "Roms/panda.gba");
 
     return SDL_APP_CONTINUE;
 }
@@ -106,6 +119,12 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     if (dt > 100.0f)
         dt = 100.0f;
     last_time = t;
+
+	for (int i = 0; i < 100; i++) {
+		tick_cpu(&cpu, &mem);
+		printf("PC: %X\n", *cpu_reg(&cpu, 15));
+	}
+	exit(0);
 
 	nk_sdl_render(ctx, AA);
 	nk_sdl_update_TextInput(ctx);

@@ -81,23 +81,21 @@ enum DpOpCode {
 #define mmin(a,b) (((a) < (b)) ? (a) : (b))
 #define mmax(a,b) (((a) > (b)) ? (a) : (b))
 
-struct cpu {
+struct Cpu {
 	u32 regs[NBANKS][16];
 	u32 cpsr;
 	u32 spsr[NBANKS];
-	u32 instr_queue[2];
+	u32 instr_queue[3];
 };
 
-static void flush_pipeline(struct cpu *c) {
+static void flush_pipeline(struct Cpu *c) {
 	c->instr_queue[0] = 0xffffffff;
 	c->instr_queue[1] = 0xffffffff;
+	c->instr_queue[2] = 0xffffffff;
 }
 
-static void init_cpu(struct cpu *c) {
-	flush_pipeline(c);
-}
 
-static u32 *cpu_spsr(struct cpu *c) {
+static u32 *cpu_spsr(struct Cpu *c) {
 	switch (c->cpsr & CPSR_MBITS) {
 		case CPSR_MBITS_USR:
 		case CPSR_MBITS_SYS:
@@ -118,7 +116,8 @@ static u32 *cpu_spsr(struct cpu *c) {
 	}
 }
 
-static u32 *cpu_reg(struct cpu *c, u8 index) {
+
+static u32 *cpu_reg(struct Cpu *c, u8 index) {
 	switch (c->cpsr & CPSR_MBITS) {
 		case CPSR_MBITS_USR:
 		case CPSR_MBITS_SYS:
@@ -151,6 +150,12 @@ static u32 *cpu_reg(struct cpu *c, u8 index) {
 		default:
 			abort();
 	}
+}
+
+static void cpu_init(struct Cpu *c) {
+	c->cpsr = CPSR_MBITS_USR;
+	*cpu_reg(c, 15) = 0x08000000;
+	flush_pipeline(c);
 }
 
 static bool check_condition(u32 cpsr, int code) {
@@ -191,12 +196,15 @@ static bool check_condition(u32 cpsr, int code) {
 	}
 }
 
-static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
+static void execute_arm(struct Cpu *c, u32 instruction, struct Memory *m) {
 	if (!check_condition(c->cpsr, instruction >> 28)) {
+		printf("I don't execute this :3\n");
+		*cpu_reg(c, 15) += 4;
 		return;
 	}
 	// MUL, MLA
 	if ((instruction & CONCAT_MASK(0b11111100, 0b1111)) == CONCAT_MASK(0b00000000, 0b1001)) {
+		printf("MUL, MLA\n");
 		int rd = ((instruction >> 16) & 0b1111);
 		int rn = ((instruction >> 12) & 0b1111);
 		int rs = ((instruction >> 8) & 0b1111);
@@ -214,9 +222,12 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 			c->cpsr = CPSR_SET(c->cpsr, CPSR_C, 0); // Meaningless value (I don't want to implement this now)
 		}
 		*cpu_reg(c, rd) = value;
+
+		*cpu_reg(c, 15) += 4;
 	}
 	// MULL, MLAL
 	else if ((instruction & CONCAT_MASK(0b11111000, 0b1111)) == CONCAT_MASK(0b00001000, 0b1001)) {
+		printf("MULL, MLAL\n");
 		int rdhi = ((instruction >> 16) & 0b1111);
 		int rdlo = ((instruction >> 12) & 0b1111);
 		int rs = ((instruction >> 8) & 0b1111);
@@ -236,9 +247,12 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 		}
 		*cpu_reg(c, rdhi) = value >> 32;
 		*cpu_reg(c, rdlo) = value;
+
+		*cpu_reg(c, 15) += 4;
 	}
 	// SWP
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b1111)) == CONCAT_MASK(0b00010000, 0b1001)) {
+		printf("SWP\n");
 		int rn = ((instruction >> 16) & 0b1111);
 		int rd = ((instruction >> 12) & 0b1111);
 		int rm = (instruction & 0b1111);
@@ -254,21 +268,29 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 			mem_write_32(m, *cpu_reg(c, rn), *cpu_reg(c, rm));
 			*cpu_reg(c, rd) = value;
 		}
+		*cpu_reg(c, 15) += 4;
 	}
 	// LDRH, STRH
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b1111)) == CONCAT_MASK(0b00000000, 0b1011)) {
+		printf("LDRH, STRH unimplemented\n");
+		abort();
 	}
 	// LDRSB, LDRSH
 	else if ((instruction & CONCAT_MASK(0b11100001, 0b1101)) == CONCAT_MASK(0b00000001, 0b1101)) {
+		printf("LDRSB, LDRSH unimplemented\n");
+		abort();
 	}
 	// MRS
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b1111)) == CONCAT_MASK(0b00010000, 0b0000)) {
+		printf("MRS");
 		int rd = ((instruction >> 12) & 0b1111);
 		bool ps = (instruction >> 22) & 1;
 		*cpu_reg(c, rd) = ps ? *cpu_spsr(c) : c->cpsr;
+		*cpu_reg(c, 15) += 4;
 	}
 	// MSR (register)
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b1111)) == CONCAT_MASK(0b00010010, 0b0000)) {
+		printf("MSR (register)");
 		int rm = instruction & 0b1111;
 		bool pd = (instruction >> 22) & 1;
 		// TODO Usermode
@@ -279,9 +301,11 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 		else {
 			*cpu_spsr(c) = only_flags ? (*cpu_spsr(c) & ~CPSR_FLAG_MASK) | (*cpu_reg(c, rm) & CPSR_FLAG_MASK) : *cpu_reg(c, rm);
 		}
+		*cpu_reg(c, 15) += 4;
 	}
 	// MSR (immediate)
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b0000)) == CONCAT_MASK(0b00110010, 0b0000)) {
+		printf("MSR (immediate)");
 		int rm = instruction & 0b1111;
 		bool pd = (instruction >> 22) & 1;
 
@@ -298,9 +322,11 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 		else {
 			*cpu_spsr(c) = (*cpu_spsr(c) & ~CPSR_FLAG_MASK) | (operand & CPSR_FLAG_MASK);
 		}
+		*cpu_reg(c, 15) += 4;
 	}
 	// BX
 	else if ((instruction & CONCAT_MASK(0b11111111, 0b1111)) == CONCAT_MASK(0b00010010, 0b0001)) {
+		printf("BX");
 		int rn = (instruction & 0xf);
 		if (*cpu_reg(c, rn) & 1) {
 			c->cpsr = CPSR_SET(c->cpsr, CPSR_T, 1);
@@ -310,11 +336,14 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 	}
 	// Undefined instruction in Data Processing
 	else if ((instruction & CONCAT_MASK(0b11111011, 0b0000)) == CONCAT_MASK(0b00110000, 0b0000)) {
+		printf("Undefined Unimplemented");
+		abort();
 	}
 	// Data Processing
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b00100000, 0b0000) ||
 			(instruction & CONCAT_MASK(0b11100000, 0b0001)) == CONCAT_MASK(0b00000000, 0b0000) ||
 			(instruction & CONCAT_MASK(0b11100000, 0b1001)) == CONCAT_MASK(0b00000000, 0b0001)) {
+		printf("Data Processing\n");
 		int opcode = (instruction >> 21) & 0b1111;
 		int rn = ((instruction >> 16) & 0b1111);
 		int rd = ((instruction >> 12) & 0b1111);
@@ -512,6 +541,7 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 				c->cpsr = CPSR_SET(c->cpsr, CPSR_Z, !!*cpu_reg(c,rd));
 				break;
 		}
+		*cpu_reg(c, 15) += 4;
 		if (rd == 15) {
 			*cpu_reg(c, rd) += 4;
 		}
@@ -519,6 +549,7 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 	// LDR, STR
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b01000000, 0b0000) ||
 			(instruction & CONCAT_MASK(0b11100000, 0b0001)) == CONCAT_MASK(0b01100000, 0b0000)) {
+		printf("LDR, STR\n");
 		int rn = ((instruction >> 16) & 0b1111);
 		int rm = instruction & 0xf;
 		int rd = ((instruction >> 12) & 0b1111);
@@ -619,35 +650,57 @@ static void execute_arm(struct cpu *c, u32 instruction, struct Memory *m) {
 				mem_write_32(m, effective_address, *cpu_reg(c, rd));
 			}
 		}
+		*cpu_reg(c, 15) += 4;
 	}
 	// LDM, STM
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b10000000, 0b0000)) {
+		printf("LDM, STM Unimplemented\n");
+		abort();
 	}
 	// B, BL
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b10100000, 0b0000)) {
-		int offset = (instruction & 0xffffff);
+		printf("B, BL\n");
+		int offset = (instruction & 0xffffff) << 2;
 		bool l = (instruction >> 24) & 1;
-		offset |= (offset >> 23) ? 0xff000000 : 0;
+		offset |= (offset >> 25) ? 0xfc000000 : 0;
 		// TODO check if PC offsets are correct
 		if (l) {
 			*cpu_reg(c, 14) = *cpu_reg(c, 15) - 4;
 		}
-		*cpu_reg(c, 15) += offset - 8;
+		*cpu_reg(c, 15) += offset;
 		flush_pipeline(c);
 	}
 	// STC, LDC
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b11000000, 0b0000)) {
 		// Nothing happens here
+		*cpu_reg(c, 15) += 4;
 	}
 	// CDP
 	else if ((instruction & CONCAT_MASK(0b11110000, 0b0001)) == CONCAT_MASK(0b11100000, 0b0000)) {
 		// Nothing happens here
+		*cpu_reg(c, 15) += 4;
 	}
 	// MCR, MRC
 	else if ((instruction & CONCAT_MASK(0b11110000, 0b0001)) == CONCAT_MASK(0b11100000, 0b0001)) {
 		// Nothing happens here
+		*cpu_reg(c, 15) += 4;
 	}
 	// SWI
 	else if ((instruction & CONCAT_MASK(0b11110000, 0b0000)) == CONCAT_MASK(0b11110000, 0b0000)) {
+		printf("SWI Unimplemented\n");
+		abort();
+	}
+}
+
+static void tick_cpu(struct Cpu *c, struct Memory *m) {
+	if (CPSR_GET(c->cpsr, CPSR_T)) {
+		// TODO
+	}
+	else {
+		c->instr_queue[0] = mem_read_32(m, *cpu_reg(c, 15));
+		printf("Fetched %X\n", c->instr_queue[0]);
+		execute_arm(c, c->instr_queue[2], m);
+		c->instr_queue[2] = c->instr_queue[1];
+		c->instr_queue[1] = c->instr_queue[0];
 	}
 }
