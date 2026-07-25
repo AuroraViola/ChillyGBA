@@ -154,6 +154,9 @@ static u32 *cpu_reg(struct Cpu *c, u8 index) {
 
 static void cpu_init(struct Cpu *c) {
 	c->cpsr = CPSR_MBITS_USR;
+	c->cpsr = CPSR_SET(c->cpsr, CPSR_C, 1);
+	*cpu_reg(c, 13) = 0x03007f00;
+	*cpu_reg(c, 14) = 0x08000000;
 	*cpu_reg(c, 15) = 0x08000000;
 	flush_pipeline(c);
 }
@@ -194,6 +197,13 @@ static bool check_condition(u32 cpsr, int code) {
 			// TODO check what happens here
 			return false;
 	}
+}
+
+static void dump_state(struct Cpu *c) {
+	for (int i = 0; i <= 15; i++) {
+		printf("r%d: %08X\n", i, *cpu_reg(c, i));
+	}
+	printf("cpsr: %08X", c->cpsr);
 }
 
 static void execute_arm(struct Cpu *c, u32 instruction, struct Memory *m) {
@@ -271,9 +281,58 @@ static void execute_arm(struct Cpu *c, u32 instruction, struct Memory *m) {
 		*cpu_reg(c, 15) += 4;
 	}
 	// LDRH, STRH
-	else if ((instruction & CONCAT_MASK(0b11100000, 0b1111)) == CONCAT_MASK(0b00000000, 0b1011)) {
-		printf("LDRH, STRH unimplemented\n");
-		abort();
+	else if ((instruction & CONCAT_MASK(0b11100000, 0b1111)) == CONCAT_MASK(0b00000000, 0b1011) ||
+			 (instruction & CONCAT_MASK(0b11100001, 0b1101)) == CONCAT_MASK(0b00000001, 0b1101)) {
+		printf("LDRH, STRH\n");
+		int rn = ((instruction >> 16) & 0b1111);
+		int rd = ((instruction >> 12) & 0b1111);
+		int rm = (instruction & 0b1111);
+		bool p = (instruction >> 24) & 1;
+		bool u = (instruction >> 23) & 1;
+		bool w = (instruction >> 21) & 1;
+		bool l = (instruction >> 20) & 1;
+		int sh = (instruction >> 5) & 3;
+
+		u32 offset = *cpu_reg(c, rm);
+		u32 effective_address = *cpu_reg(c, rn);
+
+		if (!u) {
+			offset = -offset;
+		}
+		if (p) {
+			effective_address += offset;
+		}
+		if (w) {
+			*cpu_reg(c, rn) += offset;
+		}
+
+		if (l) {
+			switch (sh) {
+				case 0b01:
+					*cpu_reg(c, rd) = mem_read_16(m, effective_address);
+					break;
+				case 0b10:
+					*cpu_reg(c, rd) = (i32)(i8)mem_read_8(m, effective_address);
+					break;
+				case 0b11:
+					*cpu_reg(c, rd) = (i32)(i16)mem_read_16(m, effective_address);
+					break;
+			}
+		}
+		else {
+			switch (sh) {
+				case 0b01:
+					mem_write_16(m, effective_address, *cpu_reg(c, rd));
+					break;
+				case 0b10:
+					mem_write_8(m, effective_address, (i8)*cpu_reg(c, rd));
+					break;
+				case 0b11:
+					mem_write_16(m, effective_address, (i16)*cpu_reg(c, rd));
+					break;
+			}
+		}
+		*cpu_reg(c, 15) += 4;
 	}
 	// LDRSB, LDRSH
 	else if ((instruction & CONCAT_MASK(0b11100001, 0b1101)) == CONCAT_MASK(0b00000001, 0b1101)) {
@@ -659,7 +718,6 @@ static void execute_arm(struct Cpu *c, u32 instruction, struct Memory *m) {
 	}
 	// B, BL
 	else if ((instruction & CONCAT_MASK(0b11100000, 0b0000)) == CONCAT_MASK(0b10100000, 0b0000)) {
-		printf("B, BL\n");
 		int offset = (instruction & 0xffffff) << 2;
 		bool l = (instruction >> 24) & 1;
 		offset |= (offset >> 25) ? 0xfc000000 : 0;
@@ -668,6 +726,7 @@ static void execute_arm(struct Cpu *c, u32 instruction, struct Memory *m) {
 			*cpu_reg(c, 14) = *cpu_reg(c, 15) - 4;
 		}
 		*cpu_reg(c, 15) += offset;
+		printf("B, BL 0x%x\n", *cpu_reg(c, 15));
 		flush_pipeline(c);
 	}
 	// STC, LDC
@@ -698,8 +757,10 @@ static void tick_cpu(struct Cpu *c, struct Memory *m) {
 	}
 	else {
 		c->instr_queue[0] = mem_read_32(m, *cpu_reg(c, 15));
-		printf("Fetched %X\n", c->instr_queue[0]);
+		printf("Fetched 0x%X, executing 0x%X\n", c->instr_queue[0], c->instr_queue[2]);
 		execute_arm(c, c->instr_queue[2], m);
+		dump_state(c);
+		printf("\n-----------------\n\n");
 		c->instr_queue[2] = c->instr_queue[1];
 		c->instr_queue[1] = c->instr_queue[0];
 	}

@@ -125,6 +125,12 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
 		printf("PC: %X\n", *cpu_reg(&cpu, 15));
 	}
 	exit(0);
+	for (int y = 0; y < 160; y++) {
+		for (int x = 0; x < 240; x++) {
+			u16 pixel = mem_read_16(&mem, 0x06000000 + (x + (y*160)) * 2);
+			SDL_SetRenderDrawColor(renderer, (pixel & 0x1f) << 3, ((pixel >> 5) & 0x1f) << 3, ((pixel >> 10) & 0x1f) << 3, SDL_ALPHA_OPAQUE);
+		}
+	}
 
 	nk_sdl_render(ctx, AA);
 	nk_sdl_update_TextInput(ctx);
